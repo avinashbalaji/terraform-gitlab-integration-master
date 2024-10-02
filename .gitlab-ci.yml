@@ -1,0 +1,95 @@
+default:
+  image:
+    name: hashicorp/terraform
+    entrypoint: [""]
+  timeout: 15 minutes
+  cache:
+    - key: $CI_PIPELINE_ID-terraform-cache
+      paths:
+        - .terraform/
+        - .terraform.lock.hcl
+
+variables:
+  STATEFILE_NAME: "terraform.tfstate"
+  TF_ADDRESS: "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/terraform/state/${STATEFILE_NAME}"
+  TF_USERNAME: ${GITLAB_USERNAME}
+  TF_PASSWORD: ${GITLAB_TOKEN}
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+
+stages:
+  - format
+  - init
+  - validate
+  - security-scan
+  - apply
+  - configure
+  - destroy
+
+format:
+  stage: format
+  script:
+  - terraform fmt
+  cache: []
+  allow_failure: true
+
+download_provider:
+  stage: init
+  script:
+  - terraform init 
+    -backend-config=address=${TF_ADDRESS}
+    -backend-config=lock_address=${TF_ADDRESS}/lock
+    -backend-config=unlock_address=${TF_ADDRESS}/lock
+    -backend-config=username=${TF_USERNAME}
+    -backend-config=password=${TF_PASSWORD}
+    -backend-config=lock_method=POST
+    -backend-config=unlock_method=DELETE
+    -backend-config=retry_wait_min=5
+
+validate:
+  stage: validate
+  script:
+  - terraform validate
+  allow_failure: true
+
+scan:
+  stage: security-scan
+  image: 
+    name: aquasec/tfsec-ci
+    entrypoint: [""]
+  script:
+  - tfsec .
+  allow_failure: true
+
+apply_configuration: 
+  stage: apply
+  script:
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+  - terraform apply -auto-approve
+  artifacts:
+    name: "${CI_JOB_NAME}-${CI_JOB_ID}"
+    paths:
+      - ./hosts
+    expire_in: 1 day
+
+ansible:
+  image: 
+    name: alpinelinux/ansible
+    entrypoint: [""]
+  stage: configure
+  script:
+  - eval $(ssh-agent -s)
+  - chmod 400 "${SSH_PRIVATE_KEY}"
+  - ssh-add "${SSH_PRIVATE_KEY}"
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  - ansible-playbook -i hosts install-apache.yml
+  cache: []
+
+destroy_infra: 
+  when: manual
+  stage: destroy
+  script:
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+  - terraform destroy -auto-approve
